@@ -16,10 +16,9 @@ library(Kendall)
 # 2) VERi
 ##############################
 
+data <- read_excel("C:/Users/MONSTER/OneDrive - Dokuz Eylül Üniversitesi/Masaüstü/MSFT Geçmiş Verileri.xlsx")
 
-data <- read_excel("MSFT Geçmiş Verileri.xlsx")
 names(data) <- c("tarih", "close", "acilis", "yuksek", "dusuk", "hacim", "fark_yuzde")
-write.csv(data, "MSFT_Gecmis_Verileri.csv", row.names = FALSE)
 
 data$tarih <- as.Date(data$tarih, format = "%d.%m.%Y")
 
@@ -58,9 +57,6 @@ ggplot(data, aes(x = ay, y = close)) +
        x = "Ay",
        y = "Kapanış Fiyatı")
 
-# ay zaten oluşturulmuşsa tekrar oluşturma:
-# data$ay <- format(data$tarih, "%Y-%m")
-
 is_outlier <- function(x) {
   q1 <- quantile(x, 0.25, na.rm = TRUE)
   q3 <- quantile(x, 0.75, na.rm = TRUE)
@@ -68,16 +64,14 @@ is_outlier <- function(x) {
   x < (q1 - 1.5 * iqr) | x > (q3 + 1.5 * iqr)
 }
 
-# ay'ı doğru kolondan üret
 data <- data %>%
-  mutate(ay = format(tarih, "%Y-%m"))
+  mutate(ay = format(as.Date(date), "%Y-%m"))
 
 outlier_summary <- data %>%
   group_by(ay) %>%
   summarise(
     n_total = n(),
-    n_outlier = sum(is_outlier(close), na.rm = TRUE),
-    .groups = "drop"
+    n_outlier = sum(is_outlier(close))
   )
 
 print(outlier_summary)
@@ -154,6 +148,94 @@ adf.test(Y_ts)
 
 ggtsdisplay(Y_ts, main="ACF ve PACF Grafikleri")
 
+######################################################
+# 5) HOLT ÜSSEL DÜZLEŞTİRME 
+
+
+# =========================
+# =========================
+df <- data %>%
+  mutate(
+    tarih = as.Date(tarih, "%d.%m.%Y"),
+    y = as.numeric(gsub(",", ".", close))
+  ) %>%
+  filter(!is.na(tarih), !is.na(y)) %>%
+  arrange(tarih) %>%
+  distinct(tarih, .keep_all = TRUE) %>%
+  mutate(t = row_number()) %>%
+  select(tarih, y, t)
+
+# =========================
+# =========================
+m_lin  <- lm(y ~ t, data=df)
+m_quad <- lm(y ~ t + I(t^2), data=df)
+m_exp  <- lm(log(y) ~ t, data=df)   
+
+# =========================
+# =========================
+rmse <- function(a,p) sqrt(mean((a-p)^2, na.rm=TRUE))
+mape <- function(a,p) mean(abs((a-p)/a), na.rm=TRUE)*100
+
+pred_y <- function(m, data, exp_back=FALSE){
+  p <- as.numeric(predict(m, newdata=data))
+  if(exp_back) p <- exp(p)
+  p
+}
+
+sum_tab <- function(m, pred_vec){
+  s <- summary(m)
+  data.frame(
+    R2        = s$r.squared,
+    Adj_R2    = s$adj.r.squared,
+    max_p_coef = max(s$coefficients[,4], na.rm=TRUE),
+    RMSE      = rmse(df$y, pred_vec),
+    MAPE      = mape(df$y, pred_vec)
+  )
+}
+
+tab <- rbind(
+  cbind(Model="Linear",      sum_tab(m_lin,  pred_y(m_lin, df))),
+  cbind(Model="Quadratic",   sum_tab(m_quad, pred_y(m_quad, df))),
+  cbind(Model="Exponential", sum_tab(m_exp,  pred_y(m_exp,  df, exp_back=TRUE)))
+)
+
+print(tab)
+
+# =========================
+# =========================
+next_bdays <- function(last_date, h){
+  cand <- seq.Date(last_date + 1, by="day", length.out=h*3)
+  cand[!(weekdays(cand) %in% c("Saturday","Sunday"))][1:h]
+}
+
+h <- 21
+future_dates <- next_bdays(max(df$tarih), h)
+future_df <- data.frame(t = (nrow(df)+1):(nrow(df)+h))
+
+PI  <- predict(m_quad, newdata=future_df, interval="prediction", level=0.95)
+fit <- PI[,"fit"]; lo <- PI[,"lwr"]; hi <- PI[,"upr"]
+
+future_table <- data.frame(
+  Tarih   = future_dates,
+  Tahmin  = round(as.numeric(fit), 2),
+  PI_Low  = round(as.numeric(lo), 2),
+  PI_High = round(as.numeric(hi), 2)
+)
+print(head(future_table, 10))
+
+ggplot() +
+  geom_line(data=df, aes(x=tarih, y=y), linewidth=0.9) +
+  geom_vline(xintercept=max(df$tarih), linetype="dashed") +
+  geom_line(data=data.frame(tarih=future_dates, fit=fit),
+            aes(x=tarih, y=fit), linewidth=1.0) +
+  geom_ribbon(data=data.frame(tarih=future_dates, lo=lo, hi=hi),
+              aes(x=tarih, ymin=lo, ymax=hi), alpha=0.15) +
+  labs(title="21 İş Günü Forecast (Quadratic)", x="Tarih", y="Fiyat") +
+  theme_minimal()
+
+# --- Artık analizi ---
+checkresiduals(m_quad)
+
 
 
 ##############################
@@ -182,4 +264,3 @@ plot(fit_holt,
 # Holt model artık analizi
 checkresiduals(fit_holt)
 
-######################################################
